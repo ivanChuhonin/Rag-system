@@ -26,10 +26,10 @@
 точнее — сюда позже добавляется pymorphy3 (или снежный стеммер) внутри
 tokenize(), сам BM25 менять не придётся.
 
-Запуск:
-    python search.py "лучшие фильмы про космос" --engine hybrid
-    python search.py "лучшие фильмы про космос" --top-k 10 --source vk:kinoprotebya
-    python search.py --engine hybrid              # REPL: вводишь запросы построчно
+Запуск (из корня репозитория):
+    python -m rag.search "лучшие фильмы про космос" --engine hybrid
+    python -m rag.search "лучшие фильмы про космос" --top-k 10 --source vk:kinoprotebya
+    python -m rag.search --engine hybrid              # REPL: вводишь запросы построчно
 
 Зависимостей кроме stdlib нет для --engine bm25; faiss/hybrid тянут
 embed_index.py (fastembed, faiss-cpu, numpy).
@@ -44,7 +44,7 @@ import sqlite3
 import sys
 from collections import Counter, defaultdict
 
-from stopwords_ru import RU_STOPWORDS
+from rag.stopwords_ru import RU_STOPWORDS
 
 TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 BM25_K1 = 1.5

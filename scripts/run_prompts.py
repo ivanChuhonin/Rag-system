@@ -3,10 +3,10 @@
 строя ретривер (BM25+FAISS) и подключение к LLM только один раз, а не на
 каждый вопрос заново. Результаты складывает в один текстовый файл.
 
-Запуск:
-    python run_prompts.py --llm ollama
-    python run_prompts.py --llm none --top-k 8
-    python run_prompts.py --prompts test_prompts.txt --out results.txt
+Запуск (из корня репозитория):
+    python -m scripts.run_prompts --llm ollama
+    python -m scripts.run_prompts --llm none --top-k 8
+    python -m scripts.run_prompts --prompts test_prompts.txt --out results.txt
 """
 
 from __future__ import annotations
@@ -17,8 +17,8 @@ import sys
 import time
 from contextlib import redirect_stdout
 
-import ask
-from search import make_retriever, open_db
+import rag.ask as ask
+from rag.search import make_retriever, open_db
 
 
 def load_prompts(path: str) -> list[str]:

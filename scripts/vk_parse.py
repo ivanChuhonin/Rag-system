@@ -13,9 +13,9 @@ wall.get отдаёт всю историю стены постранично ч
 Список пабликов — в константе GROUPS ниже (впиши screen_name или id), либо
 передай через --groups при запуске (он переопределяет GROUPS).
 
-Запуск:
-    python vk_parse.py                                   # берёт паблики из GROUPS
-    python vk_parse.py --groups championat --limit-per-group 200 --verbose
+Запуск (из корня репозитория):
+    python -m scripts.vk_parse                                   # берёт паблики из GROUPS
+    python -m scripts.vk_parse --groups championat --limit-per-group 200 --verbose
 
 Пишет в таблицу documents (storage.py), источник помечается как
 "vk:<screen_name>". Дальше chunk.py работает без изменений.
@@ -34,9 +34,9 @@ from datetime import datetime, timezone
 
 import requests
 
-from config import vk_cfg
-from storage import open_db, clear_db, save_document
-from text_clean import clean_text
+from rag.config import vk_cfg
+from rag.storage import open_db, clear_db, save_document
+from rag.text_clean import clean_text
 
 # --------------------------------------------------------------------------- #
 # Конфиг

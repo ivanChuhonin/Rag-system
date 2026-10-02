@@ -10,9 +10,9 @@
 FAISS-индекс, если он был). После этого нужно перезапустить chunk.py и
 embed_index.py.
 
-Запуск:
-    python clean_existing.py --db news.db
-    python clean_existing.py --db news.db --dry-run    # только показать, что изменится
+Запуск (из корня репозитория):
+    python -m scripts.clean_existing --db news.db
+    python -m scripts.clean_existing --db news.db --dry-run    # только показать, что изменится
 """
 
 from __future__ import annotations
@@ -22,8 +22,8 @@ import hashlib
 import sqlite3
 import sys
 
-import chunk as ck
-from text_clean import clean_text
+import rag.chunk as ck
+from rag.text_clean import clean_text
 
 
 def run(db_path: str, dry_run: bool, sample: int) -> None:

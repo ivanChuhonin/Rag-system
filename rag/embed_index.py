@@ -14,10 +14,10 @@
 попали в индекс — отслеживается в таблице vector_index_meta (в той же
 news.db), это даёт инкрементальность через --keep-index, как у chunk.py.
 
-Запуск:
-    python embed_index.py                     # (пере)строить индекс по всем chunks
-    python embed_index.py --keep-index         # доиндексировать только новые chunks
-    python search.py "запрос" --engine faiss   # искать через этот индекс
+Запуск (из корня репозитория):
+    python -m rag.embed_index                     # (пере)строить индекс по всем chunks
+    python -m rag.embed_index --keep-index         # доиндексировать только новые chunks
+    python -m rag.search "запрос" --engine faiss   # искать через этот индекс
 
 Зависимости: fastembed, faiss-cpu, numpy (тянется вместе с ними).
 """

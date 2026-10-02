@@ -1,8 +1,9 @@
-requests>=2.31
-python-dotenv>=1.0
-fastembed>=0.8
-faiss-cpu>=1.9
-numpy>=1.26
-fastapi>=0.115
-uvicorn[standard]>=0.30
-gigachat>=0.2
+requests~=2.34.2
+python-dotenv~=1.2.4
+fastembed~=0.8.1
+faiss-cpu~=1.15.1
+numpy~=2.5.3
+fastapi~=0.142.2
+pydantic~=2.13.5
+uvicorn[standard]~=0.54.0
+gigachat~=0.2.3

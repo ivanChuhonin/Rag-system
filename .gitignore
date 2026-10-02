@@ -8,6 +8,7 @@ venv/
 *.db-journal
 *.faiss
 *.index
+.fastembed_cache/
 
 .idea/
 .vscode/

@@ -7,10 +7,10 @@
 `chunks` со ссылкой на doc_id — чтобы потом при поиске подтягивать
 title/url/date исходной статьи джойном.
 
-Запуск:
-    python chunk.py                          # news.db -> chunks по умолчанию
-    python chunk.py --chunk-size 400 --overlap 60
-    python chunk.py --keep-chunks             # не чистить chunks, пропускать уже нарезанные doc_id
+Запуск (из корня репозитория):
+    python -m rag.chunk                          # news.db -> chunks по умолчанию
+    python -m rag.chunk --chunk-size 400 --overlap 60
+    python -m rag.chunk --keep-chunks             # не чистить chunks, пропускать уже нарезанные doc_id
 
 Зависимостей кроме stdlib нет.
 """

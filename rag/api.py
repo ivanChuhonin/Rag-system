@@ -13,8 +13,8 @@ uvicorn (FastAPI крутит sync-эндпоинты в threadpool) — пло�
 для этого не предназначен. Сами индексы (BM25Index, faiss.Index) только
 читаются при поиске, так что безопасно шарить их между запросами/потоками.
 
-Запуск:
-    uvicorn api:app --reload
+Запуск (из корня репозитория):
+    uvicorn rag.api:app --reload
     curl "http://127.0.0.1:8000/search?q=фильмы+про+космос&top_k=5"
     curl "http://127.0.0.1:8000/ask?q=какой+фильм+с+юрой+борисовым&llm=ollama"
 
@@ -30,9 +30,9 @@ from fastapi import FastAPI, Query
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-import ask as ask_mod
-import embed_index as ei
-import search as se
+import rag.ask as ask_mod
+import rag.embed_index as ei
+import rag.search as se
 
 DB_PATH = "news.db"
 DEFAULT_BM25_WEIGHT = 0.7

@@ -21,12 +21,12 @@ hybrid BM25+FAISS, 70/30) и либо:
                   было причиной проблемы). Нужен GIGACHAT_CREDENTIALS в .env
                   (Authorization key из личного кабинета GigaChat API).
 
-Запуск:
-    python ask.py "какой фильм с юрой борисовым ожидается"
-    python ask.py "вопрос" --llm ollama
-    python ask.py "вопрос" --llm ollama --model qwen3.5:9b
-    python ask.py "вопрос" --llm gigachat
-    python ask.py --llm ollama                # REPL
+Запуск (из корня репозитория):
+    python -m rag.ask "какой фильм с юрой борисовым ожидается"
+    python -m rag.ask "вопрос" --llm ollama
+    python -m rag.ask "вопрос" --llm ollama --model qwen3.5:9b
+    python -m rag.ask "вопрос" --llm gigachat
+    python -m rag.ask --llm ollama                # REPL
 
 Зависимости: requests, python-dotenv, gigachat + всё, что тянет search.py
 при --engine faiss/hybrid.
@@ -42,8 +42,8 @@ import requests
 from gigachat import GigaChat
 from gigachat.models import Chat, Messages, MessagesRole
 
-from config import ollama_cfg, gigachat_cfg
-from search import make_retriever, open_db
+from rag.config import ollama_cfg, gigachat_cfg
+from rag.search import make_retriever, open_db
 
 SYSTEM_PROMPT = (
     "Ты — ассистент, который отвечает на вопросы о кино, опираясь ТОЛЬКО на "

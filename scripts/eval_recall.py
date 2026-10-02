@@ -11,9 +11,9 @@ LLM; метрика ровно настолько честная, насколь
 он обязан вернуть короткое обоснование к каждой оценке, чтобы разметку
 можно было выборочно перепроверить в JSON-выгрузке.
 
-Запуск:
-    python eval_recall.py --prompts test_prompts.txt --pool-size 10
-    python eval_recall.py --ks 1,3,5 --pool-size 5 --out eval_quick.json
+Запуск (из корня репозитория):
+    python -m scripts.eval_recall --prompts test_prompts.txt --pool-size 10
+    python -m scripts.eval_recall --ks 1,3,5 --pool-size 5 --out eval_quick.json
 """
 
 from __future__ import annotations
@@ -24,8 +24,8 @@ import re
 import sys
 import time
 
-from ask import ollama_chat, LLMError
-from search import make_retriever, open_db
+from rag.ask import ollama_chat, LLMError
+from rag.search import make_retriever, open_db
 
 JUDGE_SYSTEM_PROMPT = (
     "Ты — асессор поисковой системы про кино. Тебе дан вопрос пользователя и "

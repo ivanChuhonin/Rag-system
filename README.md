@@ -58,24 +58,27 @@ flowchart LR
 ## Структура проекта
 
 ```
-config.py           # .env -> dataclass-конфиги (Ollama/GigaChat/VK)
-storage.py           # схема documents + дедуп-запись
-vk_parse.py          # сбор постов VK API -> documents
-text_clean.py        # чистка разметки ВК/ссылок из текста поста
-chunk.py             # documents -> chunks (нарезка по предложениям)
-embed_index.py       # chunks -> FAISS-индекс (fastembed)
-stopwords_ru.py      # стоп-слова для BM25-токенизации
-search.py            # BM25 + FAISS + RRF-гибрид, переиспользуемый ретривер
-ask.py               # ретривер -> контекст -> LLM (Ollama/GigaChat) или экстрактивный ответ
-api.py               # FastAPI: /search, /ask, /health + статика UI
-static/index.html    # чат-интерфейс (без сборки)
-eval_recall.py       # Recall@K/Hit@K через LLM-as-judge
-run_prompts.py       # массовый прогон списка промптов через ask.answer()
-clean_existing.py    # ретроактивная чистка текста в уже собранных documents
+rag/                        # пайплайн и API
+    config.py                   # .env -> dataclass-конфиги (Ollama/GigaChat/VK)
+    storage.py                  # схема documents + дедуп-запись
+    text_clean.py                # чистка разметки ВК/ссылок из текста поста
+    chunk.py                     # documents -> chunks (нарезка по предложениям)
+    embed_index.py               # chunks -> FAISS-индекс (fastembed)
+    stopwords_ru.py              # стоп-слова для BM25-токенизации
+    search.py                    # BM25 + FAISS + RRF-гибрид, переиспользуемый ретривер
+    ask.py                       # ретривер -> контекст -> LLM (Ollama/GigaChat) или экстрактивный ответ
+    api.py                       # FastAPI: /search, /ask, /health + статика UI
+scripts/                     # отдельные CLI-утилиты, не часть пайплайна при запуске сервера
+    vk_parse.py                  # сбор постов VK API -> documents
+    eval_recall.py                # Recall@K/Hit@K через LLM-as-judge
+    run_prompts.py                # массовый прогон списка промптов через ask.answer()
+    clean_existing.py             # ретроактивная чистка текста в уже собранных documents
+static/index.html            # чат-интерфейс (без сборки)
 ```
 
-
-Полный список флагов — `python <скрипт>.py --help`.
+Все команды запускаются из корня репозитория как модули: `python -m rag.search ...`,
+`python -m scripts.vk_parse ...`, `uvicorn rag.api:app --reload`.
+Полный список флагов — `python -m rag.<модуль> --help` / `python -m scripts.<модуль> --help`.
 
 ## Оценка качества
 
