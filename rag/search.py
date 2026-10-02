@@ -200,7 +200,7 @@ def faiss_search(index, query: str, top_k: int, oversample_for_filter: bool) -> 
     """oversample_for_filter=True — тянуть больше кандидатов, если потом
     будем отсекать по source (у FAISS один общий индекс на все источники,
     без --source не отфильтровать заранее)."""
-    from embed_index import embed_query  # тяжёлый импорт — только когда реально нужен
+    from rag.embed_index import embed_query  # тяжёлый импорт — только когда реально нужен
 
     k = top_k
     if oversample_for_filter:
@@ -233,7 +233,7 @@ def make_retriever(conn: sqlite3.Connection, engine: str, db_path: str, index_pa
     bm25 = None
 
     if engine in ("faiss", "hybrid"):
-        import embed_index as ei
+        import rag.embed_index as ei
         index = ei.load_index(index_path or ei.default_index_path(db_path))
     if engine in ("bm25", "hybrid"):
         bm25 = build_index(conn, source)

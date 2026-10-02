@@ -172,10 +172,10 @@ def ask_endpoint(
     warning = None
     try:
         if llm == "ollama":
-            from config import ollama_cfg
+            from rag.config import ollama_cfg
             text = ask_mod.ask_ollama(q, context, model or ollama_cfg.model)
         else:
-            from config import gigachat_cfg
+            from rag.config import gigachat_cfg
             if not gigachat_cfg.credentials:
                 raise ask_mod.LLMError("не задан GIGACHAT_CREDENTIALS в .env")
             text = ask_mod.ask_gigachat(q, context)

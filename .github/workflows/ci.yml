@@ -28,3 +28,10 @@ jobs:
           import scripts.vk_parse, scripts.eval_recall, scripts.run_prompts, scripts.clean_existing
           print('OK')
           "
+
+      # Top-level smoke-imports don't execute lazy imports inside functions
+      # (e.g. search.py's `from embed_index import ...` used to be stale
+      # after the rag/ package move and only broke at request time).
+      - name: Check for un-prefixed intra-package imports
+        run: |
+          ! grep -rnE '^\s*(import|from)\s+(embed_index|config|search|ask|storage|chunk|text_clean|stopwords_ru|vk_parse|eval_recall|run_prompts|clean_existing)\b' rag scripts
