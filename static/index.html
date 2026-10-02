@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Кино-RAG</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161922;
+    --border: #262b38;
+    --text: #e6e8ee;
+    --muted: #8a8f9c;
+    --accent: #5b8cff;
+    --user-bubble: #2a3350;
+    --assistant-bubble: #1c2030;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  header h1 { font-size: 22px; margin: 0; font-weight: 600; white-space: nowrap; }
+  header .controls { display: flex; gap: 12px; margin-left: auto; flex-wrap: wrap; }
+  select, input[type=number] {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 9px 14px;
+    font-size: 16px;
+  }
+  .layout { display: flex; flex: 1; min-height: 0; }
+  main.chat { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .msg { display: flex; }
+  .msg.user { justify-content: flex-end; }
+  .msg.assistant { justify-content: flex-start; }
+  .bubble {
+    max-width: 70%;
+    padding: 10px 14px;
+    border-radius: 12px;
+    white-space: pre-wrap;
+    line-height: 1.45;
+    font-size: 14px;
+  }
+  .msg.user .bubble { background: var(--user-bubble); border-bottom-right-radius: 3px; }
+  .msg.assistant .bubble { background: var(--assistant-bubble); border-bottom-left-radius: 3px; }
+  .bubble.loading { color: var(--muted); font-style: italic; }
+  .bubble .warning { color: #e0a030; font-size: 12px; margin-top: 8px; }
+  .input-row {
+    display: flex;
+    gap: 10px;
+    padding: 14px 20px;
+    border-top: 1px solid var(--border);
+  }
+  .input-row input {
+    flex: 1;
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-size: 16px;
+  }
+  .input-row button {
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    padding: 12px 22px;
+    font-size: 16px;
+    cursor: pointer;
+  }
+  .input-row button:disabled { opacity: .5; cursor: default; }
+  aside.sources {
+    width: 340px;
+    flex-shrink: 0;
+    border-left: 1px solid var(--border);
+    background: var(--panel);
+    overflow-y: auto;
+    padding: 16px;
+  }
+  aside.sources h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 12px; }
+  .source { padding: 10px 0; border-bottom: 1px solid var(--border); display: flex; gap: 8px; }
+  .source:last-child { border-bottom: none; }
+  .source-num { color: var(--muted); font-size: 12px; flex-shrink: 0; }
+  .source-body a { color: var(--accent); text-decoration: none; font-size: 13px; font-weight: 500; }
+  .source-body a:hover { text-decoration: underline; }
+  .source-meta { color: var(--muted); font-size: 11px; margin: 3px 0 5px; }
+  .source-snippet { color: var(--text); font-size: 12px; opacity: .8; line-height: 1.4; }
+  .empty { color: var(--muted); font-size: 13px; }
+  @media (max-width: 720px) {
+    .layout { flex-direction: column; }
+    aside.sources { width: auto; border-left: none; border-top: 1px solid var(--border); max-height: 40vh; }
+  }
+</style>
+</head>
+<body>
+  <header>
+    <h1>🎬 Кино-RAG</h1>
+    <div class="controls">
+      <select id="llm" title="Источник ответа">
+        <option value="ollama">Gemma 4</option>
+        <option value="none">Без LLM (экстрактивно)</option>
+        <option value="gigachat">GigaChat</option>
+      </select>
+      <select id="engine" title="Поисковый движок">
+        <option value="hybrid" selected>hybrid</option>
+        <option value="bm25">bm25</option>
+        <option value="faiss">faiss</option>
+      </select>
+      <select id="topk" title="Сколько источников">
+        <option value="3">top 3</option>
+        <option value="5">top 5</option>
+        <option value="8" selected>top 8</option>
+      </select>
+    </div>
+  </header>
+
+  <div class="layout">
+    <main class="chat">
+      <div id="messages" class="messages">
+        <div class="msg assistant"><div class="bubble">Привет! Спроси что-нибудь о кино — источники найденных фрагментов появятся справа.</div></div>
+      </div>
+      <form id="form" class="input-row">
+        <input id="question" placeholder="Например: какой фильм с Юрой Борисовым ожидается?" autocomplete="off">
+        <button type="submit" id="send-btn">Отправить</button>
+      </form>
+    </main>
+    <aside class="sources">
+      <h2>Источники</h2>
+      <div id="sources-list"><p class="empty">Пока пусто — задай вопрос.</p></div>
+    </aside>
+  </div>
+
+<script>
+const messagesEl = document.getElementById('messages');
+const sourcesEl = document.getElementById('sources-list');
+const form = document.getElementById('form');
+const input = document.getElementById('question');
+const sendBtn = document.getElementById('send-btn');
+const llmSelect = document.getElementById('llm');
+const engineSelect = document.getElementById('engine');
+const topkSelect = document.getElementById('topk');
+
+function escapeHtml(s) {
+  const div = document.createElement('div');
+  div.textContent = s ?? '';
+  return div.innerHTML;
+}
+
+function addMessage(role, text) {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg ' + role;
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.textContent = text;
+  wrap.appendChild(bubble);
+  messagesEl.appendChild(wrap);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return bubble;
+}
+
+function formatDate(iso) {
+  return iso ? iso.slice(0, 10) : '';
+}
+
+function renderSources(sources) {
+  sourcesEl.innerHTML = '';
+  if (!sources || !sources.length) {
+    sourcesEl.innerHTML = '<p class="empty">По этому вопросу источников нет.</p>';
+    return;
+  }
+  sources.forEach((s, i) => {
+    const el = document.createElement('div');
+    el.className = 'source';
+    el.innerHTML = `
+      <div class="source-num">[${i + 1}]</div>
+      <div class="source-body">
+        <a href="${escapeHtml(s.url)}" target="_blank" rel="noopener">${escapeHtml(s.title)}</a>
+        <div class="source-meta">${escapeHtml(s.source)} · ${escapeHtml(formatDate(s.date))}</div>
+        <div class="source-snippet">${escapeHtml(s.snippet)}</div>
+      </div>`;
+    sourcesEl.appendChild(el);
+  });
+}
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const q = input.value.trim();
+  if (!q) return;
+
+  addMessage('user', q);
+  input.value = '';
+  input.disabled = true;
+  sendBtn.disabled = true;
+  const answerBubble = addMessage('assistant', '…');
+  answerBubble.classList.add('loading');
+
+  try {
+    const params = new URLSearchParams({
+      q, llm: llmSelect.value, engine: engineSelect.value, top_k: topkSelect.value,
+    });
+    const res = await fetch('/ask?' + params.toString());
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
+    }
+    const data = await res.json();
+    answerBubble.classList.remove('loading');
+    answerBubble.textContent = data.answer;
+    if (data.warning) {
+      const warn = document.createElement('div');
+      warn.className = 'warning';
+      warn.textContent = '⚠ ' + data.warning;
+      answerBubble.appendChild(warn);
+    }
+    renderSources(data.sources);
+  } catch (err) {
+    answerBubble.classList.remove('loading');
+    answerBubble.textContent = 'Ошибка: ' + err.message;
+  } finally {
+    input.disabled = false;
+    sendBtn.disabled = false;
+    input.focus();
+  }
+});
+</script>
+</body>
+</html>
