@@ -117,10 +117,20 @@ def extract_article_links(html: str) -> list[str]:
 
 
 def discover_links(session: requests.Session, limiter: RateLimiter,
-                    max_pages: int, verbose: bool) -> list[str]:
+                    max_pages: int, verbose: bool, start_page: int = 1) -> list[str]:
     """Листает /media/news/?page=N по порядку, собирая ссылки на статьи.
     Останавливается, когда страница не добавила ни одной новой ссылки
     (конец листинга), или по достижении max_pages.
+
+    start_page>1 — продолжить обход с конкретной страницы вместо начала.
+    ВАЖНО: листинг на сайте — не статический архив, а живой, отсортированный
+    по дате; если между прогонами вышли новые статьи, всё, что было дальше
+    первой страницы, сдвигается вперёд. То есть "страница 51" сегодня и
+    "страница 51" через неделю — разные наборы статей. --start-page годится
+    только для возобновления прерванного обхода В ТОТ ЖЕ день/сессию;
+    для обычной дозагрузки новых статей надёжнее просто поднять --max-pages
+    и включить --skip-existing — дубли отфильтруются сами, а не упустится
+    ничего из-за сдвига листинга.
 
     Страница 1 (голый /media/news/ без ?page=) — особый случай: по ней
     иногда отдаётся не обычный листинг, а антибот-заглушка/кэш-заглушка
@@ -130,7 +140,7 @@ def discover_links(session: requests.Session, limiter: RateLimiter,
     "концом листинга", а просто пропускается: обход продолжается со
     страницы 2."""
     seen: dict[str, None] = {}  # dict, не set — сохраняем порядок обнаружения
-    for page in range(1, max_pages + 1):
+    for page in range(start_page, max_pages + 1):
         url = LISTING_URL if page == 1 else f"{LISTING_URL}?page={page}"
         html = fetch(session, limiter, url)
         if html is None:
@@ -197,7 +207,7 @@ def parse_article(html: str, url: str) -> dict | None:
 # --------------------------------------------------------------------------- #
 
 def run(max_pages: int, limit: int | None, verbose: bool,
-        keep_db: bool, skip_existing_urls: bool) -> None:
+        keep_db: bool, skip_existing_urls: bool, start_page: int = 1) -> None:
     session = requests.Session()
     limiter = RateLimiter(MIN_REQUEST_INTERVAL)
     conn = get_connection()
@@ -217,8 +227,8 @@ def run(max_pages: int, limit: int | None, verbose: bool,
         }
         print(f"уже в базе (source=kinopoisk:news): {len(existing_urls)} статей — их пропущу.\n")
 
-    print(f"[листинг] {LISTING_URL} (до {max_pages} стр.)")
-    links = discover_links(session, limiter, max_pages, verbose)
+    print(f"[листинг] {LISTING_URL} (стр. {start_page}..{max_pages})")
+    links = discover_links(session, limiter, max_pages, verbose, start_page)
     print(f"\nвсего ссылок на статьи: {len(links)}\n")
 
     stats = {"seen": 0, "new": 0, "dup-url": 0, "dup-text": 0, "skipped_short": 0, "skipped_parse": 0}
@@ -277,7 +287,12 @@ def main(argv: list[str] | None = None) -> None:
 
     ap = argparse.ArgumentParser(description="Парсер новостей kinopoisk.ru/media/news/ -> Postgres")
     ap.add_argument("--max-pages", type=int, default=50,
-                     help="максимум страниц листинга /media/news/?page=N (по умолчанию 50)")
+                     help="до какой страницы листинга дойти (по умолчанию 50)")
+    ap.add_argument("--start-page", type=int, default=1,
+                     help="с какой страницы листинга начать (по умолчанию 1). Листинг живой "
+                          "(сортировка по дате), не статический архив — использовать вместе с "
+                          "--skip-existing, иначе при сдвиге листинга из-за новых статей можно "
+                          "пропустить часть материала между прогонами")
     ap.add_argument("--limit", type=int, default=None,
                      help="максимум НОВЫХ статей за прогон (по умолчанию — все найденные)")
     ap.add_argument("--verbose", action="store_true", help="подробный лог по каждой странице/статье")
@@ -288,7 +303,7 @@ def main(argv: list[str] | None = None) -> None:
                           "(не скачивать их заново); имеет смысл вместе с --keep-db для инкрементальных дозагрузок")
     args = ap.parse_args(argv)
 
-    run(args.max_pages, args.limit, args.verbose, args.keep_db, args.skip_existing)
+    run(args.max_pages, args.limit, args.verbose, args.keep_db, args.skip_existing, args.start_page)
 
 
 if __name__ == "__main__":
