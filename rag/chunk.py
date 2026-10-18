@@ -1,28 +1,30 @@
 """
 Чанкинг (MVP, шаг 2 — разбиение текста на фрагменты).
 
-Читает статьи из таблицы `documents` (её заполняет vk_parse.py, через storage.py), режет text на
-куски по ~300-800 слов с перехлёстом 50-100 слов, режет по границам
-предложений/абзацев (а не как попало по словам), и складывает в таблицу
-`chunks` со ссылкой на doc_id — чтобы потом при поиске подтягивать
-title/url/date исходной статьи джойном.
+Читает статьи из таблицы `documents` (её заполняют vk_parse.py/kinopoisk_parse.py,
+через storage.py), режет text на куски по ~300-800 слов с перехлёстом 50-100
+слов, режет по границам предложений/абзацев (а не как попало по словам), и
+складывает в таблицу `chunks` (Postgres) со ссылкой на doc_id — чтобы потом
+при поиске подтягивать title/url/date исходной статьи джойном.
 
 Запуск (из корня репозитория):
-    python -m rag.chunk                          # news.db -> chunks по умолчанию
+    python -m rag.chunk                          # все documents -> chunks
     python -m rag.chunk --chunk-size 400 --overlap 60
     python -m rag.chunk --keep-chunks             # не чистить chunks, пропускать уже нарезанные doc_id
 
-Зависимостей кроме stdlib нет.
+Зависимостей кроме stdlib + psycopg (через storage.py) нет.
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 import re
-import sqlite3
 import sys
 from datetime import datetime, timezone
+
+import psycopg
+
+from rag.storage import get_connection
 
 # --------------------------------------------------------------------------- #
 # Конфиг
@@ -128,81 +130,62 @@ def chunk_text(
 
 DDL = """
 CREATE TABLE IF NOT EXISTS chunks (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    doc_id      INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    id          BIGSERIAL PRIMARY KEY,
+    doc_id      BIGINT  NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     chunk_index INTEGER NOT NULL,
     text        TEXT    NOT NULL,
     word_count  INTEGER NOT NULL,
-    created_at  TEXT    NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL,
     UNIQUE(doc_id, chunk_index)
 );
 CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id);
 """
 
 
-def open_db(path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(path)
-    conn.execute("PRAGMA foreign_keys = ON")
+def open_db() -> psycopg.Connection:
+    conn = get_connection()
     has_documents = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='documents'"
+        "SELECT 1 FROM information_schema.tables WHERE table_name = 'documents'"
     ).fetchone()
     if not has_documents:
         print(
-            f"В базе {path} нет таблицы documents — сначала запусти сборщик данных "
-            "(vk_parse.py), чтобы собрать новости. Чанкинг делать не из чего, выхожу.",
+            "В базе нет таблицы documents — сначала запусти сборщик данных "
+            "(vk_parse.py/kinopoisk_parse.py), чтобы собрать новости. Чанкинг делать не из чего, выхожу.",
             file=sys.stderr,
         )
         sys.exit(1)
-    conn.executescript(DDL)
+    conn.execute(DDL)
     conn.commit()
     return conn
 
 
-def clear_chunks(conn: sqlite3.Connection) -> int:
-    n = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-    conn.execute("DELETE FROM chunks")
-    if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'sqlite_sequence'").fetchone():
-        conn.execute("DELETE FROM sqlite_sequence WHERE name = 'chunks'")
-    # chunks.id — autoincrement, после сброса новые чанки получат старые id заново.
-    # Если есть FAISS-индекс (embed_index.py), его bookkeeping по старым id
-    # станет враньём — почистим и его, иначе --keep-index потом молча пропустит
-    # заново пронумерованные, но на деле новые чанки.
-    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='vector_index_meta'").fetchone():
-        conn.execute("DELETE FROM vector_index_meta")
+def clear_chunks(conn: psycopg.Connection) -> int:
+    """Чистит chunks. embedding — просто колонка на chunks (добавляет её
+    embed_index.py), так что TRUNCATE уносит и её — отдельно чистить
+    векторы/индекс не нужно, в отличие от старой схемы с FAISS-файлом."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM chunks")
+        n = cur.fetchone()[0]
+        cur.execute("TRUNCATE chunks RESTART IDENTITY CASCADE")
     conn.commit()
-
-    # тот же резон: файл индекса по умолчанию (<db>.faiss) хранит сами старые
-    # векторы, не только bookkeeping — если его не убрать, --keep-index потом
-    # домешает новые векторы поверх старых с задублированными id. Кастомный
-    # --index-path (нестандартный путь) сюда не попадает — это уже на совести
-    # того, кто им пользуется.
-    db_file = next(
-        (row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main" and row[2]),
-        None,
-    )
-    if db_file:
-        default_faiss_path = os.path.splitext(db_file)[0] + ".faiss"
-        if os.path.exists(default_faiss_path):
-            os.remove(default_faiss_path)
-            print(f"также удалил устаревший FAISS-индекс: {default_faiss_path}")
-
     return n
 
 
-def already_chunked_doc_ids(conn: sqlite3.Connection) -> set[int]:
+def already_chunked_doc_ids(conn: psycopg.Connection) -> set[int]:
     return {row[0] for row in conn.execute("SELECT DISTINCT doc_id FROM chunks")}
 
 
-def save_chunks(conn: sqlite3.Connection, doc_id: int, pieces: list[str]) -> int:
-    now = datetime.now(timezone.utc).isoformat()
-    conn.executemany(
-        "INSERT INTO chunks (doc_id, chunk_index, text, word_count, created_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        [
-            (doc_id, i, piece, len(_WORD_RE.findall(piece)), now)
-            for i, piece in enumerate(pieces)
-        ],
-    )
+def save_chunks(conn: psycopg.Connection, doc_id: int, pieces: list[str]) -> int:
+    now = datetime.now(timezone.utc)
+    with conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO chunks (doc_id, chunk_index, text, word_count, created_at) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            [
+                (doc_id, i, piece, len(_WORD_RE.findall(piece)), now)
+                for i, piece in enumerate(pieces)
+            ],
+        )
     return len(pieces)
 
 
@@ -210,9 +193,9 @@ def save_chunks(conn: sqlite3.Connection, doc_id: int, pieces: list[str]) -> int
 # Основной цикл
 # --------------------------------------------------------------------------- #
 
-def run(db_path: str, chunk_size: int, overlap: int, min_words: int,
+def run(chunk_size: int, overlap: int, min_words: int,
         limit: int | None, verbose: bool, keep_chunks: bool) -> None:
-    conn = open_db(db_path)
+    conn = open_db()
 
     if keep_chunks:
         skip_ids = already_chunked_doc_ids(conn)
@@ -265,11 +248,11 @@ def run(db_path: str, chunk_size: int, overlap: int, min_words: int,
             next_milestone += PROGRESS_EVERY
 
     conn.commit()
-    _report(stats, db_path)
+    _report(stats)
     conn.close()
 
 
-def _report(stats: dict, db_path: str) -> None:
+def _report(stats: dict) -> None:
     avg = stats["chunks_created"] / stats["docs_chunked"] if stats["docs_chunked"] else 0
     print("\n" + "-" * 60)
     print(f"документов просмотрено : {stats['docs_seen']}")
@@ -277,7 +260,6 @@ def _report(stats: dict, db_path: str) -> None:
     print(f"  пропущено (keep)     : {stats['docs_skipped']}")
     print(f"  пустых после чанкинга: {stats['docs_empty']}")
     print(f"чанков создано         : {stats['chunks_created']} (~{avg:.1f} на документ)")
-    print(f"база                   : {db_path}")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -287,8 +269,7 @@ def main(argv: list[str] | None = None) -> None:
         except Exception:
             pass
 
-    ap = argparse.ArgumentParser(description="Чанкинг documents -> chunks")
-    ap.add_argument("--db", default="news.db", help="путь к файлу SQLite (тот же, что у vk_parse.py)")
+    ap = argparse.ArgumentParser(description="Чанкинг documents -> chunks (Postgres)")
     ap.add_argument("--chunk-size", type=int, default=CHUNK_SIZE_WORDS, help="целевой размер чанка, слов")
     ap.add_argument("--overlap", type=int, default=CHUNK_OVERLAP_WORDS, help="перехлёст между чанками, слов")
     ap.add_argument("--min-words", type=int, default=MIN_CHUNK_WORDS, help="минимальный размер чанка, слов")
@@ -297,7 +278,7 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--keep-chunks", action="store_true",
                     help="не очищать chunks перед запуском, пропускать уже нарезанные документы")
     args = ap.parse_args(argv)
-    run(args.db, args.chunk_size, args.overlap, args.min_words, args.limit, args.verbose, args.keep_chunks)
+    run(args.chunk_size, args.overlap, args.min_words, args.limit, args.verbose, args.keep_chunks)
 
 
 if __name__ == "__main__":

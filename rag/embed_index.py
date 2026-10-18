@@ -1,38 +1,40 @@
 """
-Векторный индекс (MVP, шаг 3b — FAISS поверх chunks).
+Векторный индекс (pgvector поверх chunks — раньше тут был FAISS-файл).
 
 Считает эмбеддинги текста чанков локальной моделью через fastembed (ONNX,
-без torch, без Ollama/GigaChat — работает офлайн) и складывает в FAISS
-(IndexFlatIP поверх L2-нормированных векторов = косинусная близость).
+без torch, без Ollama/GigaChat — работает офлайн) и пишет их прямо в колонку
+chunks.embedding (vector(384), добавляет её сюда же миграцией при первом
+запуске) — отдельного файла-индекса больше нет, вектор живёт в той же строке,
+что текст чанка. Поиск по ним — HNSW-индекс (vector_cosine_ops), см. search.py.
 
 Модель: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
 (384 измерения, ~225 МБ, многоязычная — годится для русского). Веса
 скачиваются один раз и кешируются в .fastembed_cache/ рядом с этим файлом.
 
-Соответствие chunk_id <-> вектор хранит сам FAISS (IndexIDMap: id чанка
-и есть id вектора) — отдельный файл-мэппинг не нужен. Какие chunk_id уже
-попали в индекс — отслеживается в таблице vector_index_meta (в той же
-news.db), это даёт инкрементальность через --keep-index, как у chunk.py.
+Какие chunk_id уже заэмбеддены — видно по chunks.embedding IS NOT NULL,
+это даёт инкрементальность через --keep-index без отдельной таблицы учёта.
 
 Запуск (из корня репозитория):
-    python -m rag.embed_index                     # (пере)строить индекс по всем chunks
-    python -m rag.embed_index --keep-index         # доиндексировать только новые chunks
-    python -m rag.search "запрос" --engine faiss   # искать через этот индекс
+    python -m rag.embed_index                     # (пере)считать эмбеддинги по всем chunks
+    python -m rag.embed_index --keep-index         # доэмбеддить только новые chunks
+    python -m rag.search "запрос" --engine faiss   # искать через эти векторы
 
-Зависимости: fastembed, faiss-cpu, numpy (тянется вместе с ними).
+Зависимости: fastembed, numpy (тянется вместе с fastembed), psycopg+pgvector
+(через storage.py).
 """
 
 from __future__ import annotations
 
 import argparse
 import os
-import sqlite3
 import sys
 import time
 
-import faiss
 import numpy as np
+import psycopg
 from fastembed import TextEmbedding
+
+from rag.storage import get_connection
 
 EMBED_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 EMBED_DIM = 384
@@ -41,10 +43,14 @@ CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".fastembed
 BATCH_SIZE = 64
 PROGRESS_EVERY = 2_000  # эмбеддинг медленнее, чем чанкинг/save — печатаем чаще
 
+# HNSW — приближённый ближайший поиск, на 47k векторов практической разницы
+# с полным перебором нет, но индекс готов расти вместе с корпусом без
+# переделки запросов. vector_cosine_ops — векторы L2-нормированы ниже, так
+# что cosine distance здесь корректная мера.
 DDL = """
-CREATE TABLE IF NOT EXISTS vector_index_meta (
-    chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE
-);
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS embedding vector(384);
+CREATE INDEX IF NOT EXISTS idx_chunks_embedding
+    ON chunks USING hnsw (embedding vector_cosine_ops);
 """
 
 _embedder: TextEmbedding | None = None
@@ -76,63 +82,33 @@ def embed_query(text: str) -> np.ndarray:
 
 
 # --------------------------------------------------------------------------- #
-# БД / индекс на диске
+# БД
 # --------------------------------------------------------------------------- #
 
-def open_db(path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(path)
+def open_db() -> psycopg.Connection:
+    conn = get_connection()
     has_chunks = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunks'"
+        "SELECT 1 FROM information_schema.tables WHERE table_name = 'chunks'"
     ).fetchone()
     if not has_chunks:
-        sys.exit(f"В базе {path} нет таблицы chunks — сначала запусти chunk.py.")
-    conn.executescript(DDL)
+        sys.exit("В базе нет таблицы chunks — сначала запусти chunk.py.")
+    conn.execute(DDL)
     conn.commit()
     return conn
 
 
-def default_index_path(db_path: str) -> str:
-    base, _ = os.path.splitext(db_path)
-    return base + ".faiss"
-
-
-def load_index(index_path: str) -> faiss.Index:
-    """Загружает существующий индекс. Кидает понятную ошибку, если его нет
-    или размерность не совпадает с текущей моделью (значит модель менялась)."""
-    if not os.path.exists(index_path):
-        sys.exit(f"Индекс {index_path} не найден — сначала запусти embed_index.py.")
-    index = faiss.read_index(index_path)
-    if index.d != EMBED_DIM:
-        sys.exit(
-            f"У индекса {index_path} размерность {index.d}, а у текущей модели {EMBED_DIM}. "
-            "Модель поменялась — пересобери индекс без --keep-index."
-        )
-    return index
-
-
-def _fresh_index() -> faiss.Index:
-    return faiss.IndexIDMap(faiss.IndexFlatIP(EMBED_DIM))
-
-
 # --------------------------------------------------------------------------- #
-# Построение / обновление индекса
+# Построение / обновление эмбеддингов
 # --------------------------------------------------------------------------- #
 
-def build(db_path: str, index_path: str, keep_index: bool, batch_size: int, verbose: bool) -> None:
-    conn = open_db(db_path)
+def build(keep_index: bool, batch_size: int, verbose: bool) -> None:
+    conn = open_db()
 
-    if keep_index and os.path.exists(index_path):
-        index = load_index(index_path)
-        already = {row[0] for row in conn.execute("SELECT chunk_id FROM vector_index_meta")}
-        print(f"--keep-index: в индексе уже {index.ntotal} векторов, пропущу {len(already)} чанков.\n")
-    else:
-        index = _fresh_index()
-        already = set()
-        conn.execute("DELETE FROM vector_index_meta")
+    if not keep_index:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE chunks SET embedding = NULL")
         conn.commit()
-        if os.path.exists(index_path):
-            os.remove(index_path)
-        print("строю индекс заново.\n")
+        print("сбросил старые эмбеддинги — считаю заново.\n")
 
     total_chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
     if total_chunks == 0:
@@ -140,10 +116,12 @@ def build(db_path: str, index_path: str, keep_index: bool, batch_size: int, verb
         conn.close()
         return
 
-    rows = conn.execute("SELECT id, text FROM chunks ORDER BY id").fetchall()
-    todo = [(cid, text) for cid, text in rows if cid not in already]
-    print(f"всего чанков: {total_chunks}, к индексации: {len(todo)}")
-    if not todo:
+    rows = conn.execute(
+        "SELECT id, text FROM chunks WHERE embedding IS NULL ORDER BY id"
+    ).fetchall()
+    already = total_chunks - len(rows)
+    print(f"всего чанков: {total_chunks}, уже с эмбеддингом: {already}, к расчёту: {len(rows)}")
+    if not rows:
         conn.close()
         return
 
@@ -154,17 +132,17 @@ def build(db_path: str, index_path: str, keep_index: bool, batch_size: int, verb
     t_start = time.time()
     next_milestone = PROGRESS_EVERY
 
-    for i in range(0, len(todo), batch_size):
-        batch = todo[i:i + batch_size]
-        ids = np.array([cid for cid, _ in batch], dtype=np.int64)
+    for i in range(0, len(rows), batch_size):
+        batch = rows[i:i + batch_size]
+        ids = [cid for cid, _ in batch]
         texts = [text for _, text in batch]
 
         vecs = embed_passages(texts)
-        index.add_with_ids(vecs, ids)
-        conn.executemany(
-            "INSERT OR IGNORE INTO vector_index_meta (chunk_id) VALUES (?)",
-            [(int(cid),) for cid in ids],
-        )
+        with conn.cursor() as cur:
+            cur.executemany(
+                "UPDATE chunks SET embedding = %s WHERE id = %s",
+                [(vec, cid) for cid, vec in zip(ids, vecs)],
+            )
         conn.commit()
         added += len(batch)
 
@@ -172,16 +150,15 @@ def build(db_path: str, index_path: str, keep_index: bool, batch_size: int, verb
             print(f"  + {len(batch)} чанков embedded (batch {i // batch_size + 1})")
         if added >= next_milestone:
             rate = added / (time.time() - t_start)
-            print(f"\n>>> заэмбеддено чанков: {added}/{len(todo)} (~{rate:.0f}/сек)\n")
+            print(f"\n>>> заэмбеддено чанков: {added}/{len(rows)} (~{rate:.0f}/сек)\n")
             next_milestone += PROGRESS_EVERY
 
-    faiss.write_index(index, index_path)
     dt = time.time() - t_start
+    n_total = conn.execute("SELECT COUNT(*) FROM chunks WHERE embedding IS NOT NULL").fetchone()[0]
     print("\n" + "-" * 60)
     print(f"добавлено векторов : {added}")
-    print(f"всего в индексе    : {index.ntotal}")
+    print(f"всего в базе       : {n_total}")
     print(f"время              : {dt:.1f}с (~{added / dt if dt else 0:.0f}/сек)")
-    print(f"индекс             : {os.path.abspath(index_path)}")
     conn.close()
 
 
@@ -192,18 +169,14 @@ def main(argv: list[str] | None = None) -> None:
         except Exception:
             pass
 
-    ap = argparse.ArgumentParser(description="Строит/обновляет FAISS-индекс по chunks")
-    ap.add_argument("--db", default="news.db", help="путь к файлу SQLite")
-    ap.add_argument("--index-path", default=None,
-                    help="путь к файлу индекса (по умолчанию <db>.faiss рядом с базой)")
+    ap = argparse.ArgumentParser(description="Считает эмбеддинги chunks -> chunks.embedding (pgvector)")
     ap.add_argument("--batch-size", type=int, default=BATCH_SIZE, help="размер батча эмбеддинга")
     ap.add_argument("--keep-index", action="store_true",
-                    help="не пересобирать индекс с нуля, доиндексировать только новые чанки")
+                    help="не пересчитывать эмбеддинги с нуля, досчитать только новые чанки")
     ap.add_argument("--verbose", action="store_true", help="лог по каждому батчу")
     args = ap.parse_args(argv)
 
-    index_path = args.index_path or default_index_path(args.db)
-    build(args.db, index_path, args.keep_index, args.batch_size, args.verbose)
+    build(args.keep_index, args.batch_size, args.verbose)
 
 
 if __name__ == "__main__":

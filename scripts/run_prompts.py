@@ -1,6 +1,6 @@
 """
 Раннер для test_prompts.txt — прогоняет все промпты через ask.answer(),
-строя ретривер (BM25+FAISS) и подключение к LLM только один раз, а не на
+строя ретривер (BM25+pgvector) и подключение к LLM только один раз, а не на
 каждый вопрос заново. Результаты складывает в один текстовый файл.
 
 Запуск (из корня репозитория):
@@ -43,8 +43,7 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--out", default="test_results.txt")
     ap.add_argument("--llm", choices=["none", "ollama", "gigachat"], default="ollama")
     ap.add_argument("--model", default=None)
-    ap.add_argument("--engine", choices=["bm25", "faiss", "hybrid"], default="hybrid")
-    ap.add_argument("--db", default="news.db")
+    ap.add_argument("--engine", choices=["bm25", "vector", "hybrid"], default="hybrid")
     ap.add_argument("--top-k", type=int, default=8)
     ap.add_argument("--bm25-weight", type=float, default=0.7)
     args = ap.parse_args(argv)
@@ -54,9 +53,8 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(f"В {args.prompts} нет промптов (строки без # и непустые).")
     print(f"промптов: {len(prompts)}, llm={args.llm}, engine={args.engine}, top_k={args.top_k}")
 
-    conn = open_db(args.db)
-    run_query_topk = make_retriever(conn, args.engine, args.db, None,
-                                    None, args.bm25_weight, verbose=True)
+    conn = open_db()
+    run_query_topk = make_retriever(conn, args.engine, None, args.bm25_weight, verbose=True)
 
     with open(args.out, "w", encoding="utf-8") as out:
         out.write(f"llm={args.llm} model={args.model or '(default)'} engine={args.engine} "

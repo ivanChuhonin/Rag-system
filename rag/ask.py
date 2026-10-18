@@ -2,7 +2,7 @@
 /ask (MVP, шаг 4 — финальный ответ с источниками).
 
 Берёт топ-чанки под вопрос через ретривер из search.py (по умолчанию
-hybrid BM25+FAISS, 70/30) и либо:
+hybrid BM25+pgvector, 70/30) и либо:
 
   --llm none      (по умолчанию) — экстрактивный ответ: сами топ-фрагменты
                   с источниками, без генерации текста. Работает без каких-
@@ -29,15 +29,15 @@ hybrid BM25+FAISS, 70/30) и либо:
     python -m rag.ask --llm ollama                # REPL
 
 Зависимости: requests, python-dotenv, gigachat + всё, что тянет search.py
-при --engine faiss/hybrid.
+при --engine vector/hybrid.
 """
 
 from __future__ import annotations
 
 import argparse
-import sqlite3
 import sys
 
+import psycopg
 import requests
 from gigachat import GigaChat
 from gigachat.models import Chat, Messages, MessagesRole
@@ -166,7 +166,7 @@ def extractive_answer(results: list[dict]) -> str:
 # Основной цикл
 # --------------------------------------------------------------------------- #
 
-def answer(conn: sqlite3.Connection, run_query_topk, question: str, top_k: int,
+def answer(conn: psycopg.Connection, run_query_topk, question: str, top_k: int,
           llm: str, model: str | None) -> None:
     results = run_query_topk(question, top_k)
     if not results:
@@ -208,21 +208,18 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("question", nargs="?", default=None, help="вопрос; без него — интерактивный режим")
     ap.add_argument("--llm", choices=["none", "ollama", "gigachat"], default="none", help="источник ответа")
     ap.add_argument("--model", default=None, help="(--llm ollama) модель, иначе OLLAMA_MODEL из .env")
-    ap.add_argument("--engine", choices=["bm25", "faiss", "hybrid"], default="hybrid", help="движок ретривера")
-    ap.add_argument("--db", default="news.db", help="путь к файлу SQLite")
-    ap.add_argument("--index-path", default=None, help="путь к FAISS-индексу, по умолчанию <db>.faiss")
+    ap.add_argument("--engine", choices=["bm25", "vector", "hybrid"], default="hybrid", help="движок ретривера")
     ap.add_argument("--top-k", type=int, default=8, help="сколько чанков подать в контекст")
     ap.add_argument("--source", default=None, help="фильтр по source, например vk:kinoprotebya")
     ap.add_argument("--bm25-weight", type=float, default=0.7, help="(--engine hybrid) вес BM25 в RRF")
     args = ap.parse_args(argv)
 
-    conn = open_db(args.db)
+    conn = open_db()
     n_chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
     if n_chunks == 0:
         sys.exit("В chunks 0 строк — нечего искать. Запусти vk_parse.py, потом chunk.py.")
 
-    run_query_topk = make_retriever(conn, args.engine, args.db, args.index_path,
-                                    args.source, args.bm25_weight, verbose=True)
+    run_query_topk = make_retriever(conn, args.engine, args.source, args.bm25_weight, verbose=True)
 
     if args.question:
         answer(conn, run_query_topk, args.question, args.top_k, args.llm, args.model)

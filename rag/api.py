@@ -5,13 +5,13 @@ GET /search?q=...    -> топ-чанки со score и ссылками на и
 GET /ask?q=...        -> ответ (LLM или экстрактивно) + источники.
 GET /                 -> простой чат-UI (static/index.html), источники справа.
 
-BM25-индекс и FAISS-индекс строятся один раз при старте сервера (lifespan),
-не на каждый запрос — иначе на 47k+ чанков это было бы секунды на каждый
-HTTP-запрос впустую. SQLite-соединение — новое на каждый запрос: файл
-локальный, открытие дёшево, а гонять один sqlite3.Connection между потоками
-uvicorn (FastAPI крутит sync-эндпоинты в threadpool) — плохая идея, sqlite3
-для этого не предназначен. Сами индексы (BM25Index, faiss.Index) только
-читаются при поиске, так что безопасно шарить их между запросами/потоками.
+BM25-индекс строится один раз при старте сервера (lifespan), не на каждый
+запрос — иначе на 47k+ чанков это было бы секунды на каждый HTTP-запрос
+впустую. Векторный поиск (pgvector) живёт в самой БД — его не нужно грузить
+в память отдельно, каждый запрос просто шлёт SQL. Postgres-соединение —
+новое на каждый HTTP-запрос: открытие дёшево, а гонять одно соединение между
+потоками uvicorn (FastAPI крутит sync-эндпоинты в threadpool) — та же логика,
+что была с sqlite3, только теперь без ограничения "один писатель за раз".
 
 Запуск (из корня репозитория):
     uvicorn rag.api:app --reload
@@ -23,7 +23,6 @@ uvicorn (FastAPI крутит sync-эндпоинты в threadpool) — пло�
 
 from __future__ import annotations
 
-import sqlite3
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Query
@@ -31,10 +30,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import rag.ask as ask_mod
-import rag.embed_index as ei
 import rag.search as se
+from rag.storage import get_connection
 
-DB_PATH = "news.db"
 DEFAULT_BM25_WEIGHT = 0.7
 
 
@@ -73,22 +71,20 @@ class AskResponse(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_connection()
     has_chunks = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunks'"
+        "SELECT 1 FROM information_schema.tables WHERE table_name = 'chunks'"
     ).fetchone()
     if not has_chunks:
         conn.close()
-        raise RuntimeError(f"В {DB_PATH} нет таблицы chunks — запусти vk_parse.py, потом chunk.py.")
+        raise RuntimeError("В базе нет таблицы chunks — запусти vk_parse.py, потом chunk.py.")
 
     n_chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+    n_vectors = conn.execute("SELECT COUNT(*) FROM chunks WHERE embedding IS NOT NULL").fetchone()[0]
     print(f"строю BM25-индекс: {n_chunks} чанков...")
     app.state.bm25 = se.build_index(conn, None)  # без source-фильтра — глобальный индекс
-
-    index_path = ei.default_index_path(DB_PATH)
-    print(f"гружу FAISS-индекс: {index_path}...")
-    app.state.faiss_index = ei.load_index(index_path)
-    print(f"готово: BM25 {app.state.bm25.n_docs} чанков, FAISS {app.state.faiss_index.ntotal} векторов")
+    app.state.n_vectors = n_vectors
+    print(f"готово: BM25 {app.state.bm25.n_docs} чанков, pgvector {n_vectors} векторов")
 
     conn.close()
     yield
@@ -97,39 +93,31 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Кино-RAG API", lifespan=lifespan)
 
 
-def get_conn() -> sqlite3.Connection:
-    return sqlite3.connect(DB_PATH)
-
-
 # --------------------------------------------------------------------------- #
-# Ретривер — переиспользует уже построенные индексы, source фильтруется
-# постфактум (тем же способом, что и в search.py для FAISS: берём с запасом,
-# отсекаем по source, обрезаем до top_k) — один глобальный индекс проще
-# держать в памяти, чем пересобирать под каждый source на каждый запрос.
+# Ретривер — переиспользует уже построенный BM25-индекс, векторный поиск
+# фильтруется по source прямо в SQL (см. se.vector_search).
 # --------------------------------------------------------------------------- #
 
 def retrieve(query: str, top_k: int, engine: str, source: str | None, bm25_weight: float) -> list[dict]:
-    conn = get_conn()
+    conn = get_connection()
     try:
         bm25 = app.state.bm25
-        candidate_k = max(top_k * 8, 50) if source else top_k
 
         if engine == "bm25":
-            hits = bm25.search(query, candidate_k)
+            hits = bm25.search(query, top_k)
             return se.fetch_results(conn, hits, source=source, limit=top_k)
 
-        if engine == "faiss":
-            hits = se.faiss_search(app.state.faiss_index, query, candidate_k,
-                                   oversample_for_filter=bool(source))
+        if engine == "vector":
+            hits = se.vector_search(conn, query, top_k, source=source)
             return se.fetch_results(conn, hits, source=source, limit=top_k)
 
         # hybrid
         w_bm25 = bm25_weight
-        w_faiss = 1.0 - w_bm25
+        w_vector = 1.0 - w_bm25
+        candidate_k = max(top_k * 6, 30)
         bm25_hits = bm25.search(query, candidate_k)
-        faiss_hits = se.faiss_search(app.state.faiss_index, query, candidate_k,
-                                     oversample_for_filter=bool(source))
-        fused = se.rrf_fuse([bm25_hits, faiss_hits], weights=[w_bm25, w_faiss])
+        vector_hits = se.vector_search(conn, query, candidate_k, source=source)
+        fused = se.rrf_fuse([bm25_hits, vector_hits], weights=[w_bm25, w_vector])
         return se.fetch_results(conn, fused, source=source, limit=top_k)
     finally:
         conn.close()
@@ -143,7 +131,7 @@ def retrieve(query: str, top_k: int, engine: str, source: str | None, bm25_weigh
 def search_endpoint(
     q: str = Query(..., min_length=1, description="поисковый запрос"),
     top_k: int = Query(5, ge=1, le=50),
-    engine: str = Query("hybrid", pattern="^(bm25|faiss|hybrid)$"),
+    engine: str = Query("hybrid", pattern="^(bm25|vector|hybrid)$"),
     source: str | None = Query(None, description="фильтр по source, например vk:kinoprotebya"),
     bm25_weight: float = Query(DEFAULT_BM25_WEIGHT, ge=0.0, le=1.0, description="только для hybrid"),
 ):
@@ -157,7 +145,7 @@ def ask_endpoint(
     top_k: int = Query(8, ge=1, le=20, description="сколько чанков подать в контекст"),
     llm: str = Query("none", pattern="^(none|ollama|gigachat)$"),
     model: str | None = Query(None, description="только для llm=ollama"),
-    engine: str = Query("hybrid", pattern="^(bm25|faiss|hybrid)$"),
+    engine: str = Query("hybrid", pattern="^(bm25|vector|hybrid)$"),
     source: str | None = Query(None),
     bm25_weight: float = Query(DEFAULT_BM25_WEIGHT, ge=0.0, le=1.0),
 ):
@@ -191,7 +179,7 @@ def health():
     return {
         "status": "ok",
         "bm25_chunks": app.state.bm25.n_docs,
-        "faiss_vectors": app.state.faiss_index.ntotal,
+        "vectors": app.state.n_vectors,
     }
 
 

@@ -1,8 +1,10 @@
 requests~=2.34.2
+beautifulsoup4~=4.15.0
 python-dotenv~=1.2.4
 fastembed~=0.8.1
-faiss-cpu~=1.15.1
 numpy~=2.4.6
+psycopg[binary]~=3.2.12
+pgvector~=0.4.1
 fastapi~=0.142.2
 pydantic~=2.13.5
 uvicorn[standard]~=0.54.0

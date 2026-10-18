@@ -238,7 +238,7 @@ def crawl_group(session: requests.Session, limiter: RateLimiter, access_token: s
 # Основной цикл
 # --------------------------------------------------------------------------- #
 
-def run(groups: list[str], db_path: str, limit_per_group: int | None,
+def run(groups: list[str], limit_per_group: int | None,
         verbose: bool, keep_db: bool, access_token: str, skip_existing: bool = False) -> None:
     if not access_token:
         sys.exit(
@@ -248,7 +248,7 @@ def run(groups: list[str], db_path: str, limit_per_group: int | None,
 
     session = requests.Session()
     limiter = RateLimiter(MIN_REQUEST_INTERVAL)
-    conn = open_db(db_path)
+    conn = open_db()
 
     if keep_db:
         print("--keep-db: старые записи в базе сохранены.\n")
@@ -267,18 +267,17 @@ def run(groups: list[str], db_path: str, limit_per_group: int | None,
             print(f"  ! пропускаю группу '{group_ref}': {e}", file=sys.stderr)
             continue
 
-    _report(stats, db_path)
+    _report(stats)
     conn.close()
 
 
-def _report(stats: dict, db_path: str) -> None:
+def _report(stats: dict) -> None:
     print("\n" + "-" * 60)
     print(f"постов просмотрено : {stats['posts_seen']}")
     print(f"  новых            : {stats['new']}")
     print(f"  дубль url        : {stats['dup-url']}")
     print(f"  дубль текст      : {stats['dup-text']}")
     print(f"  пустых/коротких  : {stats['skipped_empty']}")
-    print(f"база               : {os.path.abspath(db_path)}")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -293,7 +292,6 @@ def main(argv: list[str] | None = None) -> None:
                     help="список пабликов через запятую: screen_name или числовой id "
                          "(например: championat,footballtoday,sports_ru). "
                          "Если не задан — берётся список GROUPS в начале файла.")
-    ap.add_argument("--db", default="news.db", help="путь к файлу SQLite (общий с chunk.py)")
     ap.add_argument("--limit-per-group", type=int, default=None,
                     help="максимум постов с одной группы (по умолчанию — вся стена)")
     ap.add_argument("--verbose", action="store_true", help="подробный лог по каждому посту")
@@ -316,7 +314,7 @@ def main(argv: list[str] | None = None) -> None:
         )
 
     token = args.token or vk_cfg.access_token
-    run(groups, args.db, args.limit_per_group, args.verbose, args.keep_db, token, args.skip_existing)
+    run(groups, args.limit_per_group, args.verbose, args.keep_db, token, args.skip_existing)
 
 
 if __name__ == "__main__":

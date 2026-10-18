@@ -6,28 +6,28 @@
 
 Пересчитывает text_hash под новый текст. Раз текст документов меняется —
 существующие chunks (нарезаны из старого текста) становятся неактуальными,
-поэтому чистит их же (через chunk.clear_chunks — заодно инвалидирует и
-FAISS-индекс, если он был). После этого нужно перезапустить chunk.py и
+поэтому чистит их же (через chunk.clear_chunks — заодно уносит и эмбеддинги,
+они просто колонка на chunks). После этого нужно перезапустить chunk.py и
 embed_index.py.
 
 Запуск (из корня репозитория):
-    python -m scripts.clean_existing --db news.db
-    python -m scripts.clean_existing --db news.db --dry-run    # только показать, что изменится
+    python -m scripts.clean_existing
+    python -m scripts.clean_existing --dry-run    # только показать, что изменится
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
-import sqlite3
 import sys
 
 import rag.chunk as ck
+from rag.storage import get_connection
 from rag.text_clean import clean_text
 
 
-def run(db_path: str, dry_run: bool, sample: int) -> None:
-    conn = sqlite3.connect(db_path)
+def run(dry_run: bool, sample: int) -> None:
+    conn = get_connection()
     rows = conn.execute("SELECT id, text FROM documents").fetchall()
 
     changed: list[tuple[int, str, str]] = []
@@ -58,16 +58,17 @@ def run(db_path: str, dry_run: bool, sample: int) -> None:
         conn.close()
         return
 
-    conn.executemany(
-        "UPDATE documents SET text = ?, text_hash = ? WHERE id = ?",
-        [(after, hashlib.sha256(after.encode("utf-8")).hexdigest(), doc_id)
-         for doc_id, _, after in changed],
-    )
+    with conn.cursor() as cur:
+        cur.executemany(
+            "UPDATE documents SET text = %s, text_hash = %s WHERE id = %s",
+            [(after, hashlib.sha256(after.encode("utf-8")).hexdigest(), doc_id)
+             for doc_id, _, after in changed],
+        )
     conn.commit()
     print(f"\nобновил {len(changed)} документов.")
 
     has_chunks = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunks'"
+        "SELECT 1 FROM information_schema.tables WHERE table_name = 'chunks'"
     ).fetchone()
     if has_chunks:
         removed = ck.clear_chunks(conn)
@@ -85,11 +86,10 @@ def main(argv: list[str] | None = None) -> None:
             pass
 
     ap = argparse.ArgumentParser(description="Применить clean_text() к уже сохранённым documents")
-    ap.add_argument("--db", default="news.db", help="путь к файлу SQLite")
     ap.add_argument("--dry-run", action="store_true", help="только показать, ничего не менять")
     ap.add_argument("--sample", type=int, default=5, help="сколько примеров изменений напечатать")
     args = ap.parse_args(argv)
-    run(args.db, args.dry_run, args.sample)
+    run(args.dry_run, args.sample)
 
 
 if __name__ == "__main__":

@@ -120,8 +120,7 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--out", default="eval_results.json")
     ap.add_argument("--pool-size", type=int, default=10, help="сколько кандидатов судить на вопрос")
     ap.add_argument("--ks", default="1,3,5,10", help="через запятую, максимум не больше --pool-size")
-    ap.add_argument("--engine", choices=["bm25", "faiss", "hybrid"], default="hybrid")
-    ap.add_argument("--db", default="news.db")
+    ap.add_argument("--engine", choices=["bm25", "vector", "hybrid"], default="hybrid")
     ap.add_argument("--bm25-weight", type=float, default=0.7)
     ap.add_argument("--limit", type=int, default=None, help="оценить только первые N вопросов (для смоук-теста)")
     args = ap.parse_args(argv)
@@ -136,8 +135,8 @@ def main(argv: list[str] | None = None) -> None:
     if not prompts:
         sys.exit(f"в {args.prompts} нет промптов")
 
-    conn = open_db(args.db)
-    run_query = make_retriever(conn, args.engine, args.db, None, None, args.bm25_weight, verbose=True)
+    conn = open_db()
+    run_query = make_retriever(conn, args.engine, None, args.bm25_weight, verbose=True)
 
     judged_questions = []
     t_start = time.time()

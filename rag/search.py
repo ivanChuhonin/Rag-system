@@ -4,12 +4,13 @@
   --engine bm25    (по умолчанию) — точное совпадение слов, индекс в памяти,
                    без внешних зависимостей (rank-bm25/whoosh сознательно не
                    ставим — вариант "быстро, без внешних ключей" из плана).
-  --engine faiss   — семантический поиск по векторам (embed_index.py должен
-                   быть запущен заранее). Ловит смысловые совпадения без
-                   общих слов, но на практике слабее BM25 на именных
-                   запросах (имя актёра/режиссёра) — маленькая многоязычная
-                   модель плохо различает конкретные имена собственные.
-  --engine hybrid  — BM25 + FAISS вместе через Reciprocal Rank Fusion:
+  --engine vector  — семантический поиск по векторам в Postgres/pgvector
+                   (embed_index.py должен быть запущен заранее). Ловит
+                   смысловые совпадения без общих слов, но на практике слабее
+                   BM25 на именных запросах (имя актёра/режиссёра) — маленькая
+                   многоязычная модель плохо различает конкретные имена
+                   собственные.
+  --engine hybrid  — BM25 + vector вместе через Reciprocal Rank Fusion:
                    берём топ-кандидатов от обоих, элемент получает
                    1/(60+ранг) очков от каждого списка, где встретился,
                    очки суммируются. Не требует нормализации score (BM25 и
@@ -19,6 +20,10 @@
 Индекс строится в памяти при старте (для тысяч-десятков тысяч чанков это
 доли секунды/пара секунд) и живёт, пока работает процесс — при интерактивном
 использовании (REPL) строится один раз, а не на каждый запрос.
+
+Фильтр по source для vector/hybrid уходит прямо в SQL (JOIN documents WHERE
+source = ...) — в отличие от старой схемы с одним общим FAISS-индексом на
+диске, здесь не нужно тянуть кандидатов с запасом и отсекать постфактум.
 
 Ограничение BM25: токенизация — просто нижний регистр + разбиение по словам,
 без стемминга/лемматизации. Для русского это значит, что "фильм" и "фильма"
@@ -31,8 +36,8 @@ tokenize(), сам BM25 менять не придётся.
     python -m rag.search "лучшие фильмы про космос" --top-k 10 --source vk:kinoprotebya
     python -m rag.search --engine hybrid              # REPL: вводишь запросы построчно
 
-Зависимостей кроме stdlib нет для --engine bm25; faiss/hybrid тянут
-embed_index.py (fastembed, faiss-cpu, numpy).
+Зависимостей кроме stdlib нет для --engine bm25; vector/hybrid тянут
+embed_index.py (fastembed, numpy) + psycopg/pgvector (через storage.py).
 """
 
 from __future__ import annotations
@@ -40,11 +45,13 @@ from __future__ import annotations
 import argparse
 import math
 import re
-import sqlite3
 import sys
 from collections import Counter, defaultdict
 
+import psycopg
+
 from rag.stopwords_ru import RU_STOPWORDS
+from rag.storage import get_connection
 
 TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 BM25_K1 = 1.5
@@ -120,24 +127,24 @@ class BM25Index:
 # БД
 # --------------------------------------------------------------------------- #
 
-def load_chunks(conn: sqlite3.Connection, source: str | None = None) -> list[tuple[int, str]]:
+def load_chunks(conn: psycopg.Connection, source: str | None = None) -> list[tuple[int, str]]:
     if source:
         rows = conn.execute(
             "SELECT c.id, c.text FROM chunks c JOIN documents d ON d.id = c.doc_id "
-            "WHERE d.source = ?", (source,),
+            "WHERE d.source = %s", (source,),
         ).fetchall()
     else:
         rows = conn.execute("SELECT id, text FROM chunks").fetchall()
     return rows
 
 
-def fetch_results(conn: sqlite3.Connection, hits: list[tuple[int, float]],
+def fetch_results(conn: psycopg.Connection, hits: list[tuple[int, float]],
                   source: str | None = None, limit: int | None = None) -> list[dict]:
     out = []
     for chunk_id, score in hits:
         row = conn.execute(
             "SELECT c.text, c.chunk_index, d.title, d.url, d.date, d.source "
-            "FROM chunks c JOIN documents d ON d.id = c.doc_id WHERE c.id = ?",
+            "FROM chunks c JOIN documents d ON d.id = c.doc_id WHERE c.id = %s",
             (chunk_id,),
         ).fetchone()
         if not row:
@@ -157,13 +164,13 @@ def fetch_results(conn: sqlite3.Connection, hits: list[tuple[int, float]],
     return out
 
 
-def open_db(path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(path)
+def open_db() -> psycopg.Connection:
+    conn = get_connection()
     has_chunks = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunks'"
+        "SELECT 1 FROM information_schema.tables WHERE table_name = 'chunks'"
     ).fetchone()
     if not has_chunks:
-        sys.exit(f"В базе {path} нет таблицы chunks — сначала запусти chunk.py.")
+        sys.exit("В базе нет таблицы chunks — сначала запусти chunk.py.")
     return conn
 
 
@@ -171,7 +178,7 @@ def open_db(path: str) -> sqlite3.Connection:
 # CLI
 # --------------------------------------------------------------------------- #
 
-def build_index(conn: sqlite3.Connection, source: str | None) -> BM25Index:
+def build_index(conn: psycopg.Connection, source: str | None) -> BM25Index:
     rows = load_chunks(conn, source)
     idx = BM25Index()
     idx.build(rows)
@@ -181,12 +188,11 @@ def build_index(conn: sqlite3.Connection, source: str | None) -> BM25Index:
 def rrf_fuse(ranked_lists: list[list[tuple[int, float]]], weights: list[float] | None = None,
             k: int = 60) -> list[tuple[int, float]]:
     """Reciprocal Rank Fusion — комбинирует несколько ранжированных списков
-    без нормализации сырых score (BM25 и косинус из FAISS на разных
-    шкалах, сравнивать их напрямую нельзя). Каждый список даёт элементу
-    weight/(k+ранг) очков, суммируем по всем спискам, где элемент встретился.
-    weights по умолчанию — поровну; передай, например, [0.7, 0.3], чтобы
-    доверять первому списку сильнее (у нас BM25 надёжнее на именных
-    запросах — см. rag-news-project)."""
+    без нормализации сырых score (BM25 и косинус на разных шкалах, сравнивать
+    их напрямую нельзя). Каждый список даёт элементу weight/(k+ранг) очков,
+    суммируем по всем спискам, где элемент встретился. weights по умолчанию —
+    поровну; передай, например, [0.7, 0.3], чтобы доверять первому списку
+    сильнее (у нас BM25 надёжнее на именных запросах — см. rag-news-project)."""
     if weights is None:
         weights = [1.0] * len(ranked_lists)
     scores: dict[int, float] = defaultdict(float)
@@ -196,18 +202,32 @@ def rrf_fuse(ranked_lists: list[list[tuple[int, float]]], weights: list[float] |
     return sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
 
 
-def faiss_search(index, query: str, top_k: int, oversample_for_filter: bool) -> list[tuple[int, float]]:
-    """oversample_for_filter=True — тянуть больше кандидатов, если потом
-    будем отсекать по source (у FAISS один общий индекс на все источники,
-    без --source не отфильтровать заранее)."""
+def vector_search(conn: psycopg.Connection, query: str, top_k: int,
+                  source: str | None = None) -> list[tuple[int, float]]:
+    """Косинусный поиск по chunks.embedding через pgvector (оператор <=> —
+    cosine distance, меньше = ближе). Фильтр по source — прямо в SQL через
+    JOIN, без оversampling-костыля (он был нужен только когда FAISS не умел
+    фильтровать на своей стороне). Возвращает [(chunk_id, similarity), ...],
+    similarity = 1 - distance, чтобы выше = лучше — как и у BM25/RRF."""
     from rag.embed_index import embed_query  # тяжёлый импорт — только когда реально нужен
 
-    k = top_k
-    if oversample_for_filter:
-        k = min(max(top_k * 8, 50), index.ntotal)
-    qvec = embed_query(query).reshape(1, -1)
-    scores, ids = index.search(qvec, k)
-    return [(int(i), float(s)) for i, s in zip(ids[0], scores[0]) if i != -1]
+    qvec = embed_query(query)
+    if source:
+        rows = conn.execute(
+            "SELECT c.id, c.embedding <=> %s AS distance "
+            "FROM chunks c JOIN documents d ON d.id = c.doc_id "
+            "WHERE c.embedding IS NOT NULL AND d.source = %s "
+            "ORDER BY c.embedding <=> %s LIMIT %s",
+            (qvec, source, qvec, top_k),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, embedding <=> %s AS distance FROM chunks "
+            "WHERE embedding IS NOT NULL "
+            "ORDER BY embedding <=> %s LIMIT %s",
+            (qvec, qvec, top_k),
+        ).fetchall()
+    return [(cid, 1.0 - float(dist)) for cid, dist in rows]
 
 
 def print_results(results: list[dict]) -> None:
@@ -224,41 +244,35 @@ def print_results(results: list[dict]) -> None:
 # Переиспользуемый ретривер — им пользуется и этот CLI, и ask.py
 # --------------------------------------------------------------------------- #
 
-def make_retriever(conn: sqlite3.Connection, engine: str, db_path: str, index_path: str | None,
+def make_retriever(conn: psycopg.Connection, engine: str,
                    source: str | None, bm25_weight: float, verbose: bool = True):
     """Возвращает run_query(query, top_k) -> list[dict] под выбранный engine.
-    verbose=True печатает, что именно построено/загружено (для CLI-режима;
-    ask.py вызывает с verbose=False, чтобы не засорять вывод ответа)."""
-    index = None
+    verbose=True печатает, что именно построено (для CLI-режима; ask.py
+    вызывает с verbose=False, чтобы не засорять вывод ответа)."""
     bm25 = None
-
-    if engine in ("faiss", "hybrid"):
-        import rag.embed_index as ei
-        index = ei.load_index(index_path or ei.default_index_path(db_path))
     if engine in ("bm25", "hybrid"):
         bm25 = build_index(conn, source)
 
-    if engine == "faiss":
+    if engine == "vector":
         if verbose:
-            print(f"загрузил FAISS-индекс: {index.ntotal} векторов"
-                 f"{' (фильтр source=' + source + ')' if source else ''}...")
+            print(f"векторный поиск готов (pgvector){' (фильтр source=' + source + ')' if source else ''}...")
 
         def run_query(q: str, top_k: int) -> list[dict]:
-            hits = faiss_search(index, q, top_k, oversample_for_filter=bool(source))
+            hits = vector_search(conn, q, top_k, source=source)
             return fetch_results(conn, hits, source=source, limit=top_k)
 
     elif engine == "hybrid":
         w_bm25 = bm25_weight
-        w_faiss = 1.0 - w_bm25
+        w_vector = 1.0 - w_bm25
         if verbose:
-            print(f"гибрид готов: BM25(вес={w_bm25:.2f}) + FAISS(вес={w_faiss:.2f}, {index.ntotal} векторов)"
+            print(f"гибрид готов: BM25(вес={w_bm25:.2f}) + vector(вес={w_vector:.2f})"
                  f"{' (source=' + source + ')' if source else ''}...")
 
         def run_query(q: str, top_k: int) -> list[dict]:
             candidate_k = max(top_k * 6, 30)
             bm25_hits = bm25.search(q, candidate_k)
-            faiss_hits = faiss_search(index, q, candidate_k, oversample_for_filter=bool(source))
-            fused = rrf_fuse([bm25_hits, faiss_hits], weights=[w_bm25, w_faiss])
+            vector_hits = vector_search(conn, q, candidate_k, source=source)
+            fused = rrf_fuse([bm25_hits, vector_hits], weights=[w_bm25, w_vector])
             return fetch_results(conn, fused, source=source, limit=top_k)
 
     else:  # bm25
@@ -276,26 +290,22 @@ def main(argv: list[str] | None = None) -> None:
         except Exception:
             pass
 
-    ap = argparse.ArgumentParser(description="Поиск по chunks (BM25 или FAISS)")
+    ap = argparse.ArgumentParser(description="Поиск по chunks (BM25 или pgvector)")
     ap.add_argument("query", nargs="?", default=None, help="запрос; без него — интерактивный режим")
-    ap.add_argument("--engine", choices=["bm25", "faiss", "hybrid"], default="bm25", help="движок поиска")
-    ap.add_argument("--db", default="news.db", help="путь к файлу SQLite")
-    ap.add_argument("--index-path", default=None,
-                    help="(только --engine faiss/hybrid) путь к файлу индекса, по умолчанию <db>.faiss")
+    ap.add_argument("--engine", choices=["bm25", "vector", "hybrid"], default="bm25", help="движок поиска")
     ap.add_argument("--top-k", type=int, default=5, help="сколько чанков вернуть")
     ap.add_argument("--source", default=None, help="фильтр по source, например vk:kinoprotebya")
     ap.add_argument("--bm25-weight", type=float, default=0.7,
-                    help="(только --engine hybrid) вес BM25 в RRF, 0..1 — остальное достаётся FAISS. "
+                    help="(только --engine hybrid) вес BM25 в RRF, 0..1 — остальное достаётся вектору. "
                          "BM25 надёжнее на именных запросах (актёры/режиссёры), поэтому по умолчанию 0.7")
     args = ap.parse_args(argv)
 
-    conn = open_db(args.db)
+    conn = open_db()
     n_chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
     if n_chunks == 0:
         sys.exit("В chunks 0 строк — нечего искать. Запусти vk_parse.py, потом chunk.py.")
 
-    run_query_topk = make_retriever(conn, args.engine, args.db, args.index_path,
-                                    args.source, args.bm25_weight, verbose=True)
+    run_query_topk = make_retriever(conn, args.engine, args.source, args.bm25_weight, verbose=True)
 
     def run_query(q: str) -> list[dict]:
         return run_query_topk(q, args.top_k)

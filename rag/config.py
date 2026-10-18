@@ -53,6 +53,24 @@ class VKConfig:
     access_token: str = os.getenv("VK_ACCESS_TOKEN", "")
 
 
+@dataclass
+class PostgresConfig:
+    # Локальный Postgres+pgvector из docker-compose.yml — значения тут
+    # совпадают с POSTGRES_USER/PASSWORD/DB там же.
+    host: str = os.getenv("POSTGRES_HOST", "localhost")
+    port: int = int(os.getenv("POSTGRES_PORT", "5432"))
+    user: str = os.getenv("POSTGRES_USER", "rag")
+    password: str = os.getenv("POSTGRES_PASSWORD", "rag")
+    dbname: str = os.getenv("POSTGRES_DB", "rag")
+
+    def conninfo(self) -> str:
+        return (
+            f"host={self.host} port={self.port} user={self.user} "
+            f"password={self.password} dbname={self.dbname}"
+        )
+
+
 ollama_cfg = OllamaConfig()
 gigachat_cfg = GigaChatConfig()
 vk_cfg = VKConfig()
+pg_cfg = PostgresConfig()
