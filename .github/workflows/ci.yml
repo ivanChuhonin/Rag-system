@@ -26,6 +26,7 @@ jobs:
           import rag.ask, rag.api, rag.chunk, rag.config, rag.embed_index
           import rag.search, rag.storage, rag.stopwords_ru, rag.text_clean
           import scripts.vk_parse, scripts.eval_recall, scripts.run_prompts, scripts.clean_existing
+          import scripts.kinopoisk_parse, scripts.gen_test_prompts
           print('OK')
           "
 
@@ -34,4 +35,4 @@ jobs:
       # after the rag/ package move and only broke at request time).
       - name: Check for un-prefixed intra-package imports
         run: |
-          ! grep -rnE '^\s*(import|from)\s+(embed_index|config|search|ask|storage|chunk|text_clean|stopwords_ru|vk_parse|eval_recall|run_prompts|clean_existing)\b' rag scripts
+          ! grep -rnE '^\s*(import|from)\s+(embed_index|config|search|ask|storage|chunk|text_clean|stopwords_ru|vk_parse|eval_recall|run_prompts|clean_existing|kinopoisk_parse|gen_test_prompts)\b' rag scripts

@@ -37,7 +37,7 @@ import time
 import requests
 from bs4 import BeautifulSoup
 
-from rag.storage import open_db, clear_db, save_document
+from rag.storage import get_connection, clear_db, save_document
 from rag.text_clean import clean_text
 
 BASE_URL = "https://www.kinopoisk.ru"
@@ -200,7 +200,7 @@ def run(max_pages: int, limit: int | None, verbose: bool,
         keep_db: bool, skip_existing_urls: bool) -> None:
     session = requests.Session()
     limiter = RateLimiter(MIN_REQUEST_INTERVAL)
-    conn = open_db()
+    conn = get_connection()
 
     if keep_db:
         print("--keep-db: старые записи в базе сохранены.\n")
